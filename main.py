@@ -47,6 +47,12 @@ router = Router()
 dp = Dispatcher(storage=storage)
 dp.include_router(router)
 
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    """Отмена действия"""
+    await state.clear()
+    await message.answer("❌ Действие отменено\n\nОтправьте /start для начала")
+
 class ShopRegistration(StatesGroup):
     waiting_for_name = State()
     waiting_for_city = State()
