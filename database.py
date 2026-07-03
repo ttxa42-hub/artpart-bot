@@ -6,6 +6,7 @@ from pymongo import MongoClient
 from pymongo.errors import CollectionInvalid
 
 MONGODB_URL = os.getenv('MONGODB_URL')
+DB_NAME = 'artpart'  # Жёстко задаём имя БД
 
 client = None
 db = None
@@ -19,7 +20,7 @@ def get_client():
 def get_db():
     global db
     if db is None:
-        db = get_client().get_default_database() if MONGODB_URL and '/' in MONGODB_URL.split('//')[1] else get_client()['artpart']
+        db = get_client()[DB_NAME]
     return db
 
 def test_connection():
