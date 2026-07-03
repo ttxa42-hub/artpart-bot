@@ -2,20 +2,23 @@
 """
 ArTPart42 Shop Bot
 Telegram бот для магазинов + HTTP API для приёма заявок
-MongoDB версия
+MongoDB версия + aiogram 3.x
 """
 
 import os
 import logging
+import asyncio
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher, executor, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
+    Message, CallbackQuery,
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
@@ -51,7 +54,9 @@ logger = logging.getLogger(__name__)
 # === TELEGRAM БОТ ===
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+router = Router()
+dp = Dispatcher(storage=storage)
+dp.include_router(router)
 
 # === СОСТОЯНИЯ ===
 class ShopRegistration(StatesGroup):
@@ -74,7 +79,7 @@ def log_transaction(shop_id, tx_type, amount, balance_after, description, reques
         'created_at': datetime.now().isoformat()
     }, insert=True)
 
-def notify_admin_about_payment(shop, tx_type, amount, description):
+async def notify_admin_about_payment(shop, tx_type, amount, description):
     """Уведомляет админа о платеже"""
     if not ADMIN_CHAT_ID:
         return
@@ -82,8 +87,7 @@ def notify_admin_about_payment(shop, tx_type, amount, description):
     emoji = "💰" if tx_type == "deposit_topup" else "💳" if tx_type == "subscription_payment" else "💸"
     
     try:
-        import asyncio
-        asyncio.create_task(bot.send_message(
+        await bot.send_message(
             ADMIN_CHAT_ID,
             f"{emoji} <b>Уведомление о платеже</b>\n\n"
             f"🏢 Магазин: {shop['name']} ({shop['city']})\n"
@@ -91,7 +95,7 @@ def notify_admin_about_payment(shop, tx_type, amount, description):
             f"💵 Сумма: {amount}₽\n"
             f"📝 {description}\n"
             f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        ))
+        )
     except Exception as e:
         logger.error(f"Не удалось уведомить админа: {e}")
 
@@ -165,19 +169,17 @@ def get_tariff_display_admin(shop):
 
 # === КОМАНДЫ МАГАЗИНА ===
 
-@dp.message_handler(commands=['start'])
-async def cmd_start(message: types.Message):
+@router.message(Command("start"))
+async def cmd_start(message: Message):
     """Приветствие"""
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(
-        KeyboardButton("📋 Мои заявки"),
-        KeyboardButton("📊 Статистика")
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📋 Мои заявки"), KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="💳 Мой тариф"), KeyboardButton(text="🏢 Регистрация магазина")],
+            [KeyboardButton(text="ℹ️ Помощь")]
+        ],
+        resize_keyboard=True
     )
-    keyboard.add(
-        KeyboardButton("💳 Мой тариф"),
-        KeyboardButton("🏢 Регистрация магазина")
-    )
-    keyboard.add(KeyboardButton("ℹ️ Помощь"))
     
     await message.answer(
         "👋 Добро пожаловать в ArTPart42 Shop Bot!\n\n"
@@ -186,9 +188,9 @@ async def cmd_start(message: types.Message):
         reply_markup=keyboard
     )
 
-@dp.message_handler(commands=['help'])
-@dp.message_handler(lambda m: m.text == "ℹ️ Помощь")
-async def cmd_help(message: types.Message):
+@router.message(Command("help"))
+@router.message(F.text == "ℹ️ Помощь")
+async def cmd_help(message: Message):
     """Справка"""
     await message.answer(
         "📖 <b>Как это работает:</b>\n\n"
@@ -205,9 +207,9 @@ async def cmd_help(message: types.Message):
         "По всем вопросам: @ArTPart42admin"
     )
 
-@dp.message_handler(commands=['register'])
-@dp.message_handler(lambda m: m.text == "🏢 Регистрация магазина")
-async def cmd_register(message: types.Message):
+@router.message(Command("register"))
+@router.message(F.text == "🏢 Регистрация магазина")
+async def cmd_register(message: Message):
     """Регистрация"""
     shop = execute_query_one('shops', {'chat_id': message.chat.id})
     
@@ -223,26 +225,26 @@ async def cmd_register(message: types.Message):
     await message.answer("🏢 <b>Регистрация магазина</b>\n\nВведите название магазина:")
     await ShopRegistration.waiting_for_name.set()
 
-@dp.message_handler(state=ShopRegistration.waiting_for_name)
-async def process_name(message: types.Message, state: FSMContext):
+@router.message(ShopRegistration.waiting_for_name)
+async def process_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text)
     await message.answer("📍 Введите город:")
     await ShopRegistration.waiting_for_city.set()
 
-@dp.message_handler(state=ShopRegistration.waiting_for_city)
-async def process_city(message: types.Message, state: FSMContext):
+@router.message(ShopRegistration.waiting_for_city)
+async def process_city(message: Message, state: FSMContext):
     await state.update_data(city=message.text)
     await message.answer("📞 Введите телефон для связи:")
     await ShopRegistration.waiting_for_phone.set()
 
-@dp.message_handler(state=ShopRegistration.waiting_for_phone)
-async def process_phone(message: types.Message, state: FSMContext):
+@router.message(ShopRegistration.waiting_for_phone)
+async def process_phone(message: Message, state: FSMContext):
     await state.update_data(phone=message.text)
     await message.answer("📧 Введите email (для связи):")
     await ShopRegistration.waiting_for_email.set()
 
-@dp.message_handler(state=ShopRegistration.waiting_for_email)
-async def process_email(message: types.Message, state: FSMContext):
+@router.message(ShopRegistration.waiting_for_email)
+async def process_email(message: Message, state: FSMContext):
     data = await state.get_data()
     test_end = datetime.now() + timedelta(days=DEFAULT_TEST_DAYS)
     
@@ -250,7 +252,7 @@ async def process_email(message: types.Message, state: FSMContext):
     existing = execute_query_one('shops', {'chat_id': message.chat.id})
     if existing:
         await message.answer("⚠️ Ошибка: магазин уже зарегистрирован")
-        await state.finish()
+        await state.clear()
         return
     
     # Создаём магазин
@@ -267,7 +269,7 @@ async def process_email(message: types.Message, state: FSMContext):
         'created_at': datetime.now().isoformat()
     }, insert=True)
     
-    await state.finish()
+    await state.clear()
     
     await message.answer(
         f"✅ <b>Магазин зарегистрирован!</b>\n\n"
@@ -295,9 +297,9 @@ async def process_email(message: types.Message, state: FSMContext):
         except Exception as e:
             logger.error(f"Не удалось уведомить админа: {e}")
 
-@dp.message_handler(lambda m: m.text == "💳 Мой тариф")
-@dp.message_handler(commands=['tariff'])
-async def my_tariff(message: types.Message):
+@router.message(F.text == "💳 Мой тариф")
+@router.message(Command("tariff"))
+async def my_tariff(message: Message):
     """Информация о тарифе"""
     shop = execute_query_one('shops', {'chat_id': message.chat.id})
     
@@ -325,8 +327,8 @@ async def my_tariff(message: types.Message):
             f"По вопросам: @ArTPart42admin"
         )
 
-@dp.message_handler(lambda m: m.text == "📋 Мои заявки")
-async def my_requests(message: types.Message):
+@router.message(F.text == "📋 Мои заявки")
+async def my_requests(message: Message):
     """Последние заявки"""
     shop = execute_query_one('shops', {'chat_id': message.chat.id})
     
@@ -368,9 +370,9 @@ async def my_requests(message: types.Message):
     
     await message.answer(text)
 
-@dp.message_handler(lambda m: m.text == "📊 Статистика")
-@dp.message_handler(commands=['stats'])
-async def stats(message: types.Message):
+@router.message(F.text == "📊 Статистика")
+@router.message(Command("stats"))
+async def stats(message: Message):
     """Статистика"""
     shop = execute_query_one('shops', {'chat_id': message.chat.id})
     
@@ -405,8 +407,8 @@ async def stats(message: types.Message):
 
 # === CALLBACK ОБРАБОТЧИКИ ===
 
-@dp.callback_query_handler(lambda c: c.data.startswith('show_phone_'))
-async def callback_show_phone(callback_query: types.CallbackQuery):
+@router.callback_query(F.data.startswith('show_phone_'))
+async def callback_show_phone(callback_query: CallbackQuery):
     """Показать телефон"""
     request_id = int(callback_query.data.split('_')[2])
     chat_id = callback_query.message.chat.id
@@ -460,6 +462,7 @@ async def callback_show_phone(callback_query: types.CallbackQuery):
         
         # Списываем с депозита
         new_balance = shop['deposit_balance'] - PRICE_PER_REQUEST
+        from database import get_db
         db = get_db()
         db['shops'].update_one(
             {'_id': shop['_id']},
@@ -515,6 +518,7 @@ async def callback_show_phone(callback_query: types.CallbackQuery):
     
     else:
         # Обновляем shop_request без списания
+        from database import get_db
         db = get_db()
         db['shop_requests'].update_one(
             {'_id': shop_request['_id']},
@@ -538,8 +542,8 @@ async def callback_show_phone(callback_query: types.CallbackQuery):
     
     await callback_query.answer("✅ Телефон показан", show_alert=False)
 
-@dp.callback_query_handler(lambda c: c.data.startswith('reject_'))
-async def callback_reject(callback_query: types.CallbackQuery):
+@router.callback_query(F.data.startswith('reject_'))
+async def callback_reject(callback_query: CallbackQuery):
     """Нет в наличии"""
     request_id = int(callback_query.data.split('_')[1])
     chat_id = callback_query.message.chat.id
@@ -550,6 +554,7 @@ async def callback_reject(callback_query: types.CallbackQuery):
         await callback_query.answer("❌ Магазин не найден", show_alert=True)
         return
     
+    from database import get_db
     db = get_db()
     db['shop_requests'].update_one(
         {'request_id': request_id, 'shop_id': shop['_id']},
@@ -565,12 +570,11 @@ async def callback_reject(callback_query: types.CallbackQuery):
 
 
 # === АДМИНСКИЕ КОМАНДЫ ===
-# ВАЖНО: добавляем импорт get_db (используется в админ-командах)
 from database import get_db
 from bson import ObjectId
 
-@dp.message_handler(commands=['admin'])
-async def admin_panel(message: types.Message):
+@router.message(Command("admin"))
+async def admin_panel(message: Message):
     """Админ-панель"""
     if message.chat.id != ADMIN_CHAT_ID:
         await message.answer("⛔ Доступ запрещён")
@@ -581,142 +585,87 @@ async def admin_panel(message: types.Message):
     requests_count = db['requests'].count_documents({})
     phone_shown_count = db['shop_requests'].count_documents({'phone_shown': 1})
     
-    # Общая сумма на депозитах
-    total_deposit = 0
-    for shop in db['shops'].find({'monetization_type': 'fixed'}):
-        total_deposit += shop.get('deposit_balance', 0)
+    total_deposit = sum(s.get('deposit_balance', 0) for s in db['shops'].find({'monetization_type': 'fixed'}))
     
-    # Доход за всё время
-    total_income = 0
-    for tx in db['transactions'].find({'type': 'request_charge'}):
-        total_income += abs(tx.get('amount', 0))
-    
-    total_topups = 0
-    for tx in db['transactions'].find({'type': 'deposit_topup'}):
-        total_topups += tx.get('amount', 0)
-    
-    total_subs = 0
-    for tx in db['transactions'].find({'type': 'subscription_payment'}):
-        total_subs += tx.get('amount', 0)
+    total_income = sum(abs(tx.get('amount', 0)) for tx in db['transactions'].find({'type': 'request_charge'}))
+    total_topups = sum(tx.get('amount', 0) for tx in db['transactions'].find({'type': 'deposit_topup'}))
+    total_subs = sum(tx.get('amount', 0) for tx in db['transactions'].find({'type': 'subscription_payment'}))
     
     await message.answer(
         f"👑 <b>Админ-панель</b>\n\n"
         f"🏢 Магазинов: {shops_count}\n"
         f"📥 Всего заявок: {requests_count}\n"
         f"📞 Показано телефонов: {phone_shown_count}\n\n"
-        f"💰 <b>Финансы:</b>\n"
+        f" <b>Финансы:</b>\n"
         f"💳 На депозитах: {total_deposit}₽\n"
         f"💵 Пополнений: {total_topups}₽\n"
         f"💳 Подписок: {total_subs}₽\n"
         f"💸 Списано за заявки: {total_income}₽\n\n"
         f"<b>Команды:</b>\n"
         f"/shops - список магазинов\n"
-        f"/shop_info &lt;chat_id&gt; - детали\n"
-        f"/add_deposit &lt;chat_id&gt; &lt;amount&gt; - пополнить\n"
-        f"/set_fixed &lt;chat_id&gt; - тариф Фикс\n"
-        f"/set_subscription &lt;chat_id&gt; &lt;months&gt; - подписка\n"
-        f"/set_test &lt;chat_id&gt; &lt;days&gt; - тест\n"
-        f"/notify_tariff &lt;chat_id&gt; - уведомить\n"
-        f"/transactions &lt;chat_id&gt; - история"
+        f"/shop_info <chat_id> - детали\n"
+        f"/add_deposit <chat_id> <amount> - пополнить\n"
+        f"/set_fixed <chat_id> - тариф Фикс\n"
+        f"/set_subscription <chat_id> <months> - подписка\n"
+        f"/set_test <chat_id> <days> - тест\n"
+        f"/notify_tariff <chat_id> - уведомить\n"
+        f"/transactions <chat_id> - история"
     )
 
-@dp.message_handler(commands=['shops'])
-async def list_shops(message: types.Message):
-    """Список магазинов"""
-    if message.chat.id != ADMIN_CHAT_ID:
-        return
-    
+@router.message(Command("shops"))
+async def list_shops(message: Message):
+    if message.chat.id != ADMIN_CHAT_ID: return
     db = get_db()
     shops = list(db['shops'].find({'is_active': 1}))
-    
     if not shops:
         await message.answer("📭 Магазинов пока нет")
         return
-    
     text = "🏢 <b>Список магазинов:</b>\n\n"
     for shop in shops:
-        tariff = get_tariff_display_admin(shop)
-        text += f"🏢 {shop['name']} ({shop['city']})\n"
-        text += f"   👤 Chat ID: <code>{shop['chat_id']}</code>\n"
-        text += f"   💳 {tariff}\n\n"
-    
+        text += f" {shop['name']} ({shop['city']})\n👤 Chat ID: <code>{shop['chat_id']}</code>\n💳 {get_tariff_display_admin(shop)}\n\n"
     await message.answer(text, parse_mode="HTML")
 
-@dp.message_handler(commands=['shop_info'])
-async def shop_info(message: types.Message):
-    """Детали магазина"""
-    if message.chat.id != ADMIN_CHAT_ID:
-        return
-    
+@router.message(Command("shop_info"))
+async def shop_info(message: Message):
+    if message.chat.id != ADMIN_CHAT_ID: return
     args = message.text.split()
     if len(args) != 2:
         await message.answer("Использование: /shop_info <chat_id>")
         return
-    
-    try:
-        chat_id = int(args[1])
+    try: chat_id = int(args[1])
     except ValueError:
         await message.answer("❌ Неверный формат")
         return
     
     shop = execute_query_one('shops', {'chat_id': chat_id})
-    
     if not shop:
         await message.answer("❌ Магазин не найден")
         return
     
     db = get_db()
-    shop_id = shop['_id']
-    
-    all_requests = list(db['shop_requests'].find({'shop_id': shop_id}))
+    all_requests = list(db['shop_requests'].find({'shop_id': shop['_id']}))
     total = len(all_requests)
     phone_shown = len([r for r in all_requests if r.get('phone_shown')])
     rejected = len([r for r in all_requests if r.get('status') == 'rejected'])
-    pending = len([r for r in all_requests if r.get('status') == 'pending'])
-    
-    transactions = list(db['transactions'].find(
-        {'shop_id': shop_id}
-    ).sort('created_at', -1).limit(5))
-    
-    tariff = get_tariff_display_admin(shop)
     
     text = (
-        f"🏢 <b>Информация о магазине:</b>\n\n"
-        f"🏢 {shop['name']}\n"
-        f"📍 {shop['city']}\n"
-        f"📞 {shop['phone']}\n"
-        f"📧 {shop['email']}\n"
+        f"🏢 <b>{shop['name']}</b> ({shop['city']})\n"
+        f"📞 {shop['phone']} |  {shop['email']}\n"
         f"👤 Chat ID: <code>{shop['chat_id']}</code>\n\n"
-        f"<b>Статистика:</b>\n"
-        f"📥 Всего заявок: {total}\n"
-        f"📞 Показано телефонов: {phone_shown}\n"
-        f"❌ Отказов: {rejected}\n"
-        f"⏳ Ожидают: {pending}\n\n"
-        f"<b>Тариф:</b> {tariff}\n"
+        f"📥 Всего: {total} |  Показано: {phone_shown} | ❌ Отказов: {rejected}\n\n"
+        f"<b>Тариф:</b> {get_tariff_display_admin(shop)}\n"
     )
-    
     if shop['monetization_type'] == 'fixed':
-        text += f"💳 Баланс депозита: {shop['deposit_balance']}₽\n"
-    
-    if transactions:
-        text += f"\n<b>Последние операции:</b>\n"
-        for tx in transactions:
-            emoji = "💰" if tx['amount'] > 0 else "💸"
-            text += f"{emoji} {tx['created_at'][:16]} | {tx['amount']}₽ | {tx['description']}\n"
-    
+        text += f"💳 Баланс: {shop['deposit_balance']}₽\n"
     await message.answer(text, parse_mode="HTML")
 
-@dp.message_handler(commands=['add_deposit'])
-async def add_deposit(message: types.Message):
-    """Пополнить депозит"""
-    if message.chat.id != ADMIN_CHAT_ID:
-        return
-    
+@router.message(Command("add_deposit"))
+async def add_deposit(message: Message):
+    if message.chat.id != ADMIN_CHAT_ID: return
     args = message.text.split()
     if len(args) != 3:
         await message.answer("Использование: /add_deposit <chat_id> <amount>")
         return
-    
     try:
         chat_id = int(args[1])
         amount = int(args[2])
@@ -724,107 +673,52 @@ async def add_deposit(message: types.Message):
         await message.answer("❌ Неверный формат")
         return
     
-    if amount <= 0:
-        await message.answer("❌ Сумма должна быть положительной")
-        return
-    
     shop = execute_query_one('shops', {'chat_id': chat_id})
-    
     if not shop:
         await message.answer("❌ Магазин не найден")
         return
-    
     if shop['monetization_type'] != 'fixed':
-        await message.answer(f"❌ У магазина не тариф «Фикс». Сначала /set_fixed {chat_id}")
+        await message.answer(f"❌ Сначала переведите на тариф Фикс: /set_fixed {chat_id}")
         return
     
     new_balance = shop['deposit_balance'] + amount
-    
     db = get_db()
-    db['shops'].update_one(
-        {'_id': shop['_id']},
-        {'$set': {'deposit_balance': new_balance}}
-    )
-    
+    db['shops'].update_one({'_id': shop['_id']}, {'$set': {'deposit_balance': new_balance}})
     log_transaction(shop['_id'], 'deposit_topup', amount, new_balance, 'Пополнение депозита')
     
-    await message.answer(
-        f"✅ Депозит пополнен\n\n"
-        f"🏢 {shop['name']}\n"
-        f"💵 Пополнение: {amount}₽\n"
-        f"💳 Новый баланс: {new_balance}₽"
-    )
-    
-    # Уведомляем магазин
+    await message.answer(f"✅ Депозит пополнен\n🏢 {shop['name']}\n +{amount}₽\n💳 Баланс: {new_balance}₽")
     try:
-        await bot.send_message(
-            chat_id,
-            f"💰 <b>Депозит пополнен!</b>\n\n"
-            f"💵 Сумма: {amount}₽\n"
-            f"💳 Новый баланс: {new_balance}₽\n\n"
-            f"Продолжайте получать заявки!"
-        )
-    except Exception as e:
-        logger.error(f"Не удалось уведомить магазин: {e}")
-    
-    # Уведомляем админа о пополнении
-    notify_admin_about_payment(shop, 'deposit_topup', amount, 'Пополнение депозита')
+        await bot.send_message(chat_id, f"💰 <b>Депозит пополнен!</b>\n💵 +{amount}₽\n💳 Баланс: {new_balance}₽")
+    except: pass
 
-@dp.message_handler(commands=['set_fixed'])
-async def set_fixed(message: types.Message):
-    """Тариф Фикс"""
-    if message.chat.id != ADMIN_CHAT_ID:
-        return
-    
+@router.message(Command("set_fixed"))
+async def set_fixed(message: Message):
+    if message.chat.id != ADMIN_CHAT_ID: return
     args = message.text.split()
     if len(args) != 2:
         await message.answer("Использование: /set_fixed <chat_id>")
         return
-    
-    try:
-        chat_id = int(args[1])
+    try: chat_id = int(args[1])
     except ValueError:
         await message.answer("❌ Неверный формат")
         return
     
     shop = execute_query_one('shops', {'chat_id': chat_id})
-    
     if not shop:
         await message.answer("❌ Магазин не найден")
         return
     
     db = get_db()
-    db['shops'].update_one(
-        {'_id': shop['_id']},
-        {'$set': {'monetization_type': 'fixed'}}
-    )
-    
-    await message.answer(f"✅ Магазин {shop['name']} переведён на тариф «Фикс»")
-    
-    try:
-        await bot.send_message(
-            chat_id,
-            f"💳 <b>Ваш тариф активирован!</b>\n\n"
-            f"💰 <b>Тариф: Фикс за заявку</b>\n"
-            f"💵 Стоимость: {PRICE_PER_REQUEST}₽ за обработанную заявку\n"
-            f"💳 Баланс депозита: {shop['deposit_balance']}₽\n\n"
-            f"Для пополнения свяжитесь с @ArTPart42admin\n"
-            f"Минимальная сумма: {MIN_DEPOSIT}₽"
-        )
-    except Exception as e:
-        logger.error(f"Не удалось уведомить магазин: {e}")
+    db['shops'].update_one({'_id': shop['_id']}, {'$set': {'monetization_type': 'fixed'}})
+    await message.answer(f"✅ {shop['name']} переведён на тариф «Фикс»")
 
-@dp.message_handler(commands=['set_subscription'])
-async def set_subscription(message: types.Message):
-    """Подписка"""
-    if message.chat.id != ADMIN_CHAT_ID:
-        return
-    
+@router.message(Command("set_subscription"))
+async def set_subscription(message: Message):
+    if message.chat.id != ADMIN_CHAT_ID: return
     args = message.text.split()
     if len(args) != 3:
         await message.answer("Использование: /set_subscription <chat_id> <months>")
         return
-    
     try:
         chat_id = int(args[1])
         months = int(args[2])
@@ -832,65 +726,27 @@ async def set_subscription(message: types.Message):
         await message.answer("❌ Неверный формат")
         return
     
-    if months <= 0:
-        await message.answer("❌ Количество месяцев должно быть положительным")
-        return
-    
     shop = execute_query_one('shops', {'chat_id': chat_id})
-    
     if not shop:
-        await message.answer("❌ Магазин не найден")
+        await message.answer(" Магазин не найден")
         return
     
     sub_end = datetime.now() + timedelta(days=30 * months)
     total_price = SUBSCRIPTION_PRICE * months
     
     db = get_db()
-    db['shops'].update_one(
-        {'_id': shop['_id']},
-        {'$set': {
-            'monetization_type': 'subscription',
-            'subscription_end': sub_end.isoformat()
-        }}
-    )
+    db['shops'].update_one({'_id': shop['_id']}, {'$set': {'monetization_type': 'subscription', 'subscription_end': sub_end.isoformat()}})
+    log_transaction(shop['_id'], 'subscription_payment', total_price, 0, f'Подписка на {months} мес.')
     
-    log_transaction(
-        shop['_id'], 'subscription_payment', total_price, 0,
-        f'Оплата подписки на {months} мес. (до {sub_end.strftime("%d.%m.%Y")})'
-    )
-    
-    await message.answer(
-        f"✅ Подписка установлена\n\n"
-        f"🏢 {shop['name']}\n"
-        f"💳 На {months} мес.\n"
-        f"💵 Сумма: {total_price}₽\n"
-        f"📅 До: {sub_end.strftime('%d.%m.%Y')}"
-    )
-    
-    try:
-        await bot.send_message(
-            chat_id,
-            f"💳 <b>Ваш тариф активирован!</b>\n\n"
-            f"💳 <b>Тариф: Подписка</b>\n"
-            f"💵 Стоимость: {SUBSCRIPTION_PRICE}₽/мес\n"
-            f"📅 Действует до: {sub_end.strftime('%d.%m.%Y')}\n"
-            f"⏳ Оплачено: {months} мес.\n\n"
-            f"✅ Безлимитные заявки!"
-        )
-    except Exception as e:
-        logger.error(f"Не удалось уведомить магазин: {e}")
+    await message.answer(f"✅ Подписка установлена\n {shop['name']}\n До: {sub_end.strftime('%d.%m.%Y')}")
 
-@dp.message_handler(commands=['set_test'])
-async def set_test(message: types.Message):
-    """Продлить тест"""
-    if message.chat.id != ADMIN_CHAT_ID:
-        return
-    
+@router.message(Command("set_test"))
+async def set_test(message: Message):
+    if message.chat.id != ADMIN_CHAT_ID: return
     args = message.text.split()
     if len(args) != 3:
         await message.answer("Использование: /set_test <chat_id> <days>")
         return
-    
     try:
         chat_id = int(args[1])
         days = int(args[2])
@@ -899,116 +755,73 @@ async def set_test(message: types.Message):
         return
     
     shop = execute_query_one('shops', {'chat_id': chat_id})
-    
     if not shop:
         await message.answer("❌ Магазин не найден")
         return
     
     test_end = datetime.now() + timedelta(days=days)
-    
     db = get_db()
-    db['shops'].update_one(
-        {'_id': shop['_id']},
-        {'$set': {
-            'monetization_type': 'test',
-            'test_period_end': test_end.isoformat()
-        }}
-    )
-    
+    db['shops'].update_one({'_id': shop['_id']}, {'$set': {'monetization_type': 'test', 'test_period_end': test_end.isoformat()}})
     await message.answer(f"✅ Тест продлён на {days} дней для {shop['name']}")
 
-@dp.message_handler(commands=['notify_tariff'])
-async def notify_tariff(message: types.Message):
-    """Уведомить о тарифе"""
-    if message.chat.id != ADMIN_CHAT_ID:
-        return
-    
+@router.message(Command("notify_tariff"))
+async def notify_tariff(message: Message):
+    if message.chat.id != ADMIN_CHAT_ID: return
     args = message.text.split()
     if len(args) != 2:
         await message.answer("Использование: /notify_tariff <chat_id>")
         return
-    
-    try:
-        chat_id = int(args[1])
+    try: chat_id = int(args[1])
     except ValueError:
         await message.answer("❌ Неверный формат")
         return
     
     shop = execute_query_one('shops', {'chat_id': chat_id})
-    
     if not shop:
         await message.answer("❌ Магазин не найден")
         return
     
     try:
-        await bot.send_message(
-            chat_id,
-            f"📢 <b>Важное уведомление!</b>\n\n"
-            f"Уважаемый партнёр!\n\n"
-            f"Ваш тестовый период заканчивается. Для продолжения работы необходимо выбрать тариф:\n\n"
-            f"💰 <b>Вариант 1: Фикс за заявку</b>\n"
-            f"• Пополняете депозит (от {MIN_DEPOSIT}₽)\n"
-            f"• С каждого показанного телефона списывается {PRICE_PER_REQUEST}₽\n"
-            f"• Платите только за реальные контакты\n\n"
-            f"💳 <b>Вариант 2: Подписка</b>\n"
-            f"• {SUBSCRIPTION_PRICE}₽/мес\n"
-            f"• Безлимитные заявки\n\n"
-            f"Для выбора тарифа свяжитесь с @ArTPart42admin"
-        )
+        await bot.send_message(chat_id, f"📢 <b>Важное уведомление!</b>\n\nВаш тестовый период заканчивается. Для продолжения работы выберите тариф:\n\n💰 Фикс: {PRICE_PER_REQUEST}₽/заявка\n💳 Подписка: {SUBSCRIPTION_PRICE}₽/мес\n\nСвяжитесь с @ArTPart42admin")
         await message.answer(f"✅ Уведомление отправлено {shop['name']}")
     except Exception as e:
-        logger.error(f"Не удалось отправить: {e}")
         await message.answer(f"❌ Ошибка: {e}")
 
-@dp.message_handler(commands=['transactions'])
-async def show_transactions(message: types.Message):
-    """История транзакций"""
-    if message.chat.id != ADMIN_CHAT_ID:
-        return
-    
+@router.message(Command("transactions"))
+async def show_transactions(message: Message):
+    if message.chat.id != ADMIN_CHAT_ID: return
     args = message.text.split()
     if len(args) != 2:
         await message.answer("Использование: /transactions <chat_id>")
         return
-    
-    try:
-        chat_id = int(args[1])
+    try: chat_id = int(args[1])
     except ValueError:
         await message.answer("❌ Неверный формат")
         return
     
     shop = execute_query_one('shops', {'chat_id': chat_id})
-    
     if not shop:
         await message.answer("❌ Магазин не найден")
         return
     
     db = get_db()
-    transactions = list(db['transactions'].find(
-        {'shop_id': shop['_id']}
-    ).sort('created_at', -1).limit(20))
-    
+    transactions = list(db['transactions'].find({'shop_id': shop['_id']}).sort('created_at', -1).limit(20))
     if not transactions:
         await message.answer(f"📭 У {shop['name']} нет транзакций")
         return
     
-    text = f"💳 <b>История операций — {shop['name']}</b>\n\n"
+    text = f"💳 <b>История — {shop['name']}</b>\n\n"
     for tx in transactions:
-        emoji = "💰" if tx['amount'] > 0 else "💸"
-        text += f"{emoji} {tx['created_at'][:16]}\n"
-        text += f"   {tx['description']}\n"
-        text += f"   Сумма: {tx['amount']}₽ | Баланс: {tx['balance_after']}₽\n\n"
-    
+        emoji = "" if tx['amount'] > 0 else "💸"
+        text += f"{emoji} {tx['created_at'][:16]} | {tx['amount']}₽ | {tx['description']}\n"
     await message.answer(text)
 
-
-# === ФУНКЦИЯ ОТПРАВКИ ЗАЯВОК (вызывается из HTTP API) ===
+# === ФУНКЦИЯ ОТПРАВКИ ЗАЯВОК ===
 
 async def send_request_to_shops(request_data):
     """Отправляет заявку магазинам"""
     db = get_db()
     
-    # Сохраняем заявку
     request_id = db['requests'].insert_one({
         'vin': request_data.get('vin'),
         'car_brand': request_data.get('car_brand'),
@@ -1020,29 +833,24 @@ async def send_request_to_shops(request_data):
         'created_at': datetime.now().isoformat()
     }).inserted_id
     
-    # Получаем все активные магазины
     shops = list(db['shops'].find({'is_active': 1}))
-    
     sent_count = 0
+    
     for shop in shops:
         can_receive = False
-        
         if shop['monetization_type'] == 'test':
             can_receive = True
         elif shop['monetization_type'] == 'subscription':
             if shop.get('subscription_end'):
                 try:
-                    end_date = datetime.fromisoformat(shop['subscription_end'])
-                    if end_date > datetime.now():
+                    if datetime.fromisoformat(shop['subscription_end']) > datetime.now():
                         can_receive = True
-                except:
-                    pass
+                except: pass
         elif shop['monetization_type'] == 'fixed':
             if shop.get('deposit_balance', 0) >= PRICE_PER_REQUEST:
                 can_receive = True
         
         if can_receive:
-            # Создаём запись о рассылке
             db['shop_requests'].insert_one({
                 'request_id': request_id,
                 'shop_id': shop['_id'],
@@ -1052,23 +860,17 @@ async def send_request_to_shops(request_data):
             })
             
             try:
-                keyboard = InlineKeyboardMarkup()
-                keyboard.add(
-                    InlineKeyboardButton("📞 Показать телефон", callback_data=f"show_phone_{request_id}"),
-                    InlineKeyboardButton("❌ Нет в наличии", callback_data=f"reject_{request_id}")
-                )
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📞 Показать телефон", callback_data=f"show_phone_{request_id}")],
+                    [InlineKeyboardButton(text="❌ Нет в наличии", callback_data=f"reject_{request_id}")]
+                ])
                 
-                text = (
-                    f"🚗 <b>Новая заявка #{request_id}</b>\n\n"
-                    f"🚙 Авто: {request_data.get('car_brand')} {request_data.get('car_model')}\n"
-                )
-                if request_data.get('vin'):
-                    text += f"🔑 VIN: {request_data.get('vin')}\n"
-                text += f"🔧 Запчасть: {request_data.get('part_name')}\n"
-                if request_data.get('client_name'):
-                    text += f"👤 Клиент: {request_data.get('client_name')}\n"
-                
-                text += "\nНажмите «📞 Показать телефон» чтобы связаться с клиентом"
+                text = f"🚗 <b>Новая заявка #{request_id}</b>\n\n"
+                text += f" Авто: {request_data.get('car_brand')} {request_data.get('car_model')}\n"
+                if request_data.get('vin'): text += f"🔑 VIN: {request_data.get('vin')}\n"
+                text += f" Запчасть: {request_data.get('part_name')}\n"
+                if request_data.get('client_name'): text += f"👤 Клиент: {request_data.get('client_name')}\n"
+                text += "\nНажмите « Показать телефон» чтобы связаться с клиентом"
                 
                 await bot.send_message(shop['chat_id'], text, reply_markup=keyboard)
                 sent_count += 1
@@ -1080,7 +882,6 @@ async def send_request_to_shops(request_data):
 
 # === FASTAPI ПРИЛОЖЕНИЕ ===
 
-# Проверка API ключа
 async def verify_api_key(x_api_key: str = Header(None)):
     if x_api_key != API_KEY:
         raise HTTPException(status_code=403, detail="Invalid API key")
@@ -1088,73 +889,52 @@ async def verify_api_key(x_api_key: str = Header(None)):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # При старте
     logger.info("🚀 Запуск ArTPart42 Shop Bot")
-    
-    # Проверяем подключение к MongoDB
     if test_connection():
         logger.info("✅ Подключение к MongoDB установлено")
     else:
         logger.warning("⚠️ Не удалось подключиться к MongoDB")
     
-    # Инициализируем БД
     init_db()
     
     # Запускаем бота в фоне
-    import asyncio
-    asyncio.create_task(executor.start_polling(dp, skip_updates=True))
+    poll_task = asyncio.create_task(dp.start_polling(bot))
     
     yield
     
-    # При остановке
-    logger.info("🛑 Остановка бота")
+    poll_task.cancel()
+    await bot.session.close()
+    logger.info(" Остановка бота")
 
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    """Health check для Render"""
     return {"status": "ok", "service": "ArTPart42 Shop Bot"}
 
 @app.get("/health")
 async def health():
-    """Детальная проверка здоровья"""
     db_ok = test_connection()
-    return {
-        "status": "ok" if db_ok else "degraded",
-        "database": "connected" if db_ok else "disconnected",
-        "timestamp": datetime.now().isoformat()
-    }
+    return {"status": "ok" if db_ok else "degraded", "database": "connected" if db_ok else "disconnected"}
 
 @app.post("/api/request")
 async def create_request(request_data: dict, api_key: str = Depends(verify_api_key)):
-    """Создание заявки (вызывается из приложения)"""
     try:
         request_id, sent_count = await send_request_to_shops(request_data)
-        return {
-            "success": True,
-            "request_id": request_id,
-            "shops_notified": sent_count
-        }
+        return {"success": True, "request_id": request_id, "shops_notified": sent_count}
     except Exception as e:
         logger.error(f"Ошибка создания заявки: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/stats")
 async def get_stats(api_key: str = Depends(verify_api_key)):
-    """Статистика (для админки)"""
     db = get_db()
-    shops_count = db['shops'].count_documents({})
-    requests_count = db['requests'].count_documents({})
-    phone_shown = db['shop_requests'].count_documents({'phone_shown': 1})
-    
     return {
-        "shops": shops_count,
-        "requests": requests_count,
-        "phone_shown": phone_shown
+        "shops": db['shops'].count_documents({}),
+        "requests": db['requests'].count_documents({}),
+        "phone_shown": db['shop_requests'].count_documents({'phone_shown': 1})
     }
 
 # === ЗАПУСК ===
-
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
