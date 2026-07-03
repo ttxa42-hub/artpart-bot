@@ -24,10 +24,10 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 import uvicorn
 
 from database import init_db, execute_query, execute_query_one, test_connection, get_db
+from bson import ObjectId
 
 load_dotenv()
 
-# Конфигурация
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ADMIN_CHAT_ID = int(os.getenv('ADMIN_CHAT_ID', '0'))
 API_KEY = os.getenv('API_KEY', 'default-secret-key-change-me')
@@ -57,7 +57,8 @@ def log_transaction(shop_id, tx_type, amount, balance_after, description, reques
     execute_query('transactions', {}, {
         'shop_id': shop_id, 'type': tx_type, 'amount': amount,
         'balance_after': balance_after, 'description': description,
-        'request_id': request_id, 'created_at': datetime.now().isoformat()
+        'request_id': str(request_id) if request_id else None,
+        'created_at': datetime.now().isoformat()
     }, insert=True)
 
 def get_tariff_display(shop):
@@ -78,14 +79,12 @@ def get_tariff_display(shop):
 
 def get_tariff_display_admin(shop):
     if shop['monetization_type'] == 'test':
-        return "🎁 ТЕСТ"
+        return " ТЕСТ"
     elif shop['monetization_type'] == 'fixed':
-        return f"💰 ФИКС | Депозит: {shop['deposit_balance']}₽"
+        return f" ФИКС | Депозит: {shop['deposit_balance']}₽"
     elif shop['monetization_type'] == 'subscription':
         return f"💳 ПОДПИСКА"
     return "❓ НЕ ВЫБРАН"
-
-# === КОМАНДЫ МАГАЗИНА ===
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
@@ -111,7 +110,7 @@ async def cmd_help(message: Message):
     await message.answer(
         "📖 <b>Как это работает:</b>\n\n"
         "1️⃣ Клиент оставляет заявку на сайте artpart42.ru\n"
-        "2️⃣ Заявка автоматически приходит вам в бот\n"
+        "2️ Заявка автоматически приходит вам в бот\n"
         "3️⃣ Вы нажимаете [📞 Показать телефон]\n"
         "4️⃣ Связываетесь с клиентом напрямую\n\n"
         "По вопросам: @ArTPart42admin"
@@ -122,7 +121,7 @@ async def cmd_help(message: Message):
 async def cmd_register(message: Message):
     shop = execute_query_one('shops', {'chat_id': message.chat.id})
     if shop:
-        await message.answer(f"⚠️ Магазин уже зарегистрирован:\n🏢 {shop['name']}")
+        await message.answer(f"️ Магазин уже зарегистрирован:\n {shop['name']}")
         return
     
     await message.answer("🏢 <b>Регистрация магазина</b>\n\nВведите название:")
@@ -163,7 +162,7 @@ async def process_email(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         f"✅ <b>Магазин зарегистрирован!</b>\n\n"
-        f"🏢 {data['name']}\n📍 {data['city']}\n"
+        f"🏢 {data['name']}\n {data['city']}\n"
         f"📞 {data['phone']}\n📧 {message.text}\n\n"
         f"Тестовый период до: {test_end.strftime('%d.%m.%Y')}"
     )
@@ -186,7 +185,7 @@ async def my_tariff(message: Message):
 async def my_requests(message: Message):
     shop = execute_query_one('shops', {'chat_id': message.chat.id})
     if not shop:
-        await message.answer("⚠️ Сначала зарегистрируйтесь: /register")
+        await message.answer("️ Сначала зарегистрируйтесь: /register")
         return
     
     shop_requests = execute_query('shop_requests', {'shop_id': shop['_id']}, fetch=True)
@@ -201,8 +200,8 @@ async def my_requests(message: Message):
         request = execute_query_one('requests', {'_id': sr['request_id']})
         if not request: continue
         
-        status = "📞" if sr.get('phone_shown') else "❌" if sr.get('status') == 'rejected' else "⏳"
-        text += f"{status} #{request['_id']} | {request['car_brand']} {request['car_model']}\n"
+        status = "📞" if sr.get('phone_shown') else "" if sr.get('status') == 'rejected' else "⏳"
+        text += f"{status} #{str(request['_id'])[-6:]} | {request['car_brand']} {request['car_model']}\n"
         text += f"   📝 {request['part_name']}\n\n"
     
     await message.answer(text)
@@ -225,16 +224,20 @@ async def stats(message: Message):
     
     await message.answer(text)
 
-# === CALLBACK ОБРАБОТЧИКИ ===
-
 @router.callback_query(F.data.startswith('show_phone_'))
 async def callback_show_phone(callback_query: CallbackQuery):
-    request_id = int(callback_query.data.split('_')[2])
+    request_id_str = callback_query.data.split('_', 2)[2]
     chat_id = callback_query.message.chat.id
     
     shop = execute_query_one('shops', {'chat_id': chat_id})
     if not shop:
         await callback_query.answer("❌ Магазин не найден", show_alert=True)
+        return
+    
+    try:
+        request_id = ObjectId(request_id_str)
+    except:
+        await callback_query.answer("❌ Неверный ID заявки", show_alert=True)
         return
     
     shop_request = execute_query_one('shop_requests', {'request_id': request_id, 'shop_id': shop['_id']})
@@ -250,7 +253,7 @@ async def callback_show_phone(callback_query: CallbackQuery):
         new_balance = shop['deposit_balance'] - PRICE_PER_REQUEST
         db = get_db()
         db['shops'].update_one({'_id': shop['_id']}, {'$set': {'deposit_balance': new_balance}})
-        log_transaction(shop['_id'], 'request_charge', -PRICE_PER_REQUEST, new_balance, f'Заявка #{request_id}', request_id)
+        log_transaction(shop['_id'], 'request_charge', -PRICE_PER_REQUEST, new_balance, f'Заявка #{str(request_id)[-6:]}', request_id)
         
         db['shop_requests'].update_one({'_id': shop_request['_id']}, {'$set': {'phone_shown': 1, 'status': 'responded'}})
     else:
@@ -259,7 +262,7 @@ async def callback_show_phone(callback_query: CallbackQuery):
     
     request = execute_query_one('requests', {'_id': request_id})
     await callback_query.message.edit_text(
-        f"✅ <b>Заявка #{request_id}</b>\n\n"
+        f"✅ <b>Заявка #{str(request_id)[-6:]}</b>\n\n"
         f"🚙 {request['car_brand']} {request['car_model']}\n"
         f"🔧 {request['part_name']}\n\n"
         f"📞 <b>{request['client_phone']}</b>\n"
@@ -269,19 +272,23 @@ async def callback_show_phone(callback_query: CallbackQuery):
 
 @router.callback_query(F.data.startswith('reject_'))
 async def callback_reject(callback_query: CallbackQuery):
-    request_id = int(callback_query.data.split('_')[1])
+    request_id_str = callback_query.data.split('_', 1)[1]
     chat_id = callback_query.message.chat.id
     
     shop = execute_query_one('shops', {'chat_id': chat_id})
     if not shop: return
     
+    try:
+        request_id = ObjectId(request_id_str)
+    except:
+        await callback_query.answer("❌ Неверный ID", show_alert=True)
+        return
+    
     db = get_db()
     db['shop_requests'].update_one({'request_id': request_id, 'shop_id': shop['_id']}, {'$set': {'status': 'rejected'}})
     
-    await callback_query.message.edit_text(f"❌ <b>Заявка #{request_id}</b>\n\nОтмечено: нет в наличии")
+    await callback_query.message.edit_text(f" <b>Заявка #{str(request_id)[-6:]}</b>\n\nОтмечено: нет в наличии")
     await callback_query.answer("Отмечено")
-
-# === АДМИНСКИЕ КОМАНДЫ ===
 
 @router.message(Command("admin"))
 async def admin_panel(message: Message):
@@ -294,9 +301,9 @@ async def admin_panel(message: Message):
     requests_count = db['requests'].count_documents({})
     
     await message.answer(
-        f"👑 <b>Админ-панель</b>\n\n"
+        f" <b>Админ-панель</b>\n\n"
         f"🏢 Магазинов: {shops_count}\n"
-        f"📥 Заявок: {requests_count}\n\n"
+        f" Заявок: {requests_count}\n\n"
         f"Команды:\n"
         f"/shops - список\n"
         f"/shop_info <chat_id>\n"
@@ -312,7 +319,7 @@ async def list_shops(message: Message):
     db = get_db()
     shops = list(db['shops'].find({'is_active': 1}))
     if not shops:
-        await message.answer("📭 Магазинов нет")
+        await message.answer(" Магазинов нет")
         return
     text = "🏢 <b>Магазины:</b>\n\n"
     for shop in shops:
@@ -414,16 +421,15 @@ async def set_test(message: Message):
     db['shops'].update_one({'_id': shop['_id']}, {'$set': {'monetization_type': 'test', 'test_period_end': test_end.isoformat()}})
     await message.answer(f"✅ Тест до {test_end.strftime('%d.%m.%Y')}")
 
-# === ОТПРАВКА ЗАЯВОК ===
-
 async def send_request_to_shops(request_data):
     db = get_db()
-    request_id = db['requests'].insert_one({
+    result = db['requests'].insert_one({
         'vin': request_data.get('vin'), 'car_brand': request_data.get('car_brand'),
         'car_model': request_data.get('car_model'), 'part_name': request_data.get('part_name'),
         'client_name': request_data.get('client_name'), 'client_phone': request_data.get('client_phone'),
         'status': 'new', 'created_at': datetime.now().isoformat()
-    }).inserted_id
+    })
+    request_id = result.inserted_id
     
     shops = list(db['shops'].find({'is_active': 1}))
     sent_count = 0
@@ -455,8 +461,8 @@ async def send_request_to_shops(request_data):
                     [InlineKeyboardButton(text="❌ Нет в наличии", callback_data=f"reject_{request_id}")]
                 ])
                 
-                text = f"🚗 <b>Заявка #{request_id}</b>\n\n"
-                text += f"🚙 {request_data.get('car_brand')} {request_data.get('car_model')}\n"
+                text = f"🚗 <b>Заявка #{str(request_id)[-6:]}</b>\n\n"
+                text += f" {request_data.get('car_brand')} {request_data.get('car_model')}\n"
                 text += f"🔧 {request_data.get('part_name')}\n"
                 if request_data.get('client_name'): text += f"👤 {request_data.get('client_name')}\n"
                 
@@ -466,8 +472,6 @@ async def send_request_to_shops(request_data):
                 logger.error(f"Ошибка отправки: {e}")
     
     return str(request_id), sent_count
-
-# === FASTAPI ===
 
 async def verify_api_key(x_api_key: str = Header(None)):
     if x_api_key != API_KEY:
