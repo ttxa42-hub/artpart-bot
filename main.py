@@ -47,7 +47,7 @@ router = Router()
 dp = Dispatcher(storage=storage)
 dp.include_router(router)
 
-@router.message(Command("cancel"))
+
 async def cmd_cancel(message: Message, state: FSMContext):
     """Отмена действия"""
     await state.clear()
