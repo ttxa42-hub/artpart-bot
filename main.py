@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 ArTPart42 Shop Bot - aiogram 3.x + FastAPI + MongoDB
+С автоматическим перезапуском при ошибках
 """
 
 import os
@@ -47,12 +48,6 @@ router = Router()
 dp = Dispatcher(storage=storage)
 dp.include_router(router)
 
-
-async def cmd_cancel(message: Message, state: FSMContext):
-    """Отмена действия"""
-    await state.clear()
-    await message.answer("❌ Действие отменено\n\nОтправьте /start для начала")
-
 class ShopRegistration(StatesGroup):
     waiting_for_name = State()
     waiting_for_city = State()
@@ -85,11 +80,11 @@ def get_tariff_display(shop):
 
 def get_tariff_display_admin(shop):
     if shop['monetization_type'] == 'test':
-        return " ТЕСТ"
+        return "🎁 ТЕСТ"
     elif shop['monetization_type'] == 'fixed':
         return f" ФИКС | Депозит: {shop['deposit_balance']}₽"
     elif shop['monetization_type'] == 'subscription':
-        return f"💳 ПОДПИСКА"
+        return f" ПОДПИСКА"
     return "❓ НЕ ВЫБРАН"
 
 @router.message(Command("start"))
@@ -104,11 +99,16 @@ async def cmd_start(message: Message):
     )
     
     await message.answer(
-        "👋 Добро пожаловать в ArTPart42 Shop Bot!\n\n"
+        " Добро пожаловать в ArTPart42 Shop Bot!\n\n"
         "Этот бот помогает магазинам автозапчастей получать заявки от клиентов.\n\n"
         "Выберите действие:",
         reply_markup=keyboard
     )
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Действие отменено. Отправьте /start")
 
 @router.message(Command("help"))
 @router.message(F.text == "ℹ️ Помощь")
@@ -169,7 +169,7 @@ async def process_email(message: Message, state: FSMContext):
     await message.answer(
         f"✅ <b>Магазин зарегистрирован!</b>\n\n"
         f"🏢 {data['name']}\n {data['city']}\n"
-        f"📞 {data['phone']}\n📧 {message.text}\n\n"
+        f"📞 {data['phone']}\n {message.text}\n\n"
         f"Тестовый период до: {test_end.strftime('%d.%m.%Y')}"
     )
 
@@ -185,13 +185,13 @@ async def my_tariff(message: Message):
     if tariff_info is None:
         await message.answer(f"💳 <b>Тариф</b>\n\n🏢 {shop['name']}\n\nТариф не выбран.")
     else:
-        await message.answer(f"💳 <b>Ваш тариф:</b>\n\n🏢 {shop['name']}\n\n{tariff_info}")
+        await message.answer(f" <b>Ваш тариф:</b>\n\n🏢 {shop['name']}\n\n{tariff_info}")
 
 @router.message(F.text == "📋 Мои заявки")
 async def my_requests(message: Message):
     shop = execute_query_one('shops', {'chat_id': message.chat.id})
     if not shop:
-        await message.answer("️ Сначала зарегистрируйтесь: /register")
+        await message.answer("⚠️ Сначала зарегистрируйтесь: /register")
         return
     
     shop_requests = execute_query('shop_requests', {'shop_id': shop['_id']}, fetch=True)
@@ -206,7 +206,7 @@ async def my_requests(message: Message):
         request = execute_query_one('requests', {'_id': sr['request_id']})
         if not request: continue
         
-        status = "📞" if sr.get('phone_shown') else "" if sr.get('status') == 'rejected' else "⏳"
+        status = "📞" if sr.get('phone_shown') else "❌" if sr.get('status') == 'rejected' else "⏳"
         text += f"{status} #{str(request['_id'])[-6:]} | {request['car_brand']} {request['car_model']}\n"
         text += f"   📝 {request['part_name']}\n\n"
     
@@ -224,7 +224,7 @@ async def stats(message: Message):
     total = len(all_requests)
     phone_shown = len([r for r in all_requests if r.get('phone_shown')])
     
-    text = f"📊 <b>Статистика:</b>\n\n🏢 {shop['name']}\n📥 Всего: {total}\n📞 Показано: {phone_shown}"
+    text = f" <b>Статистика:</b>\n\n🏢 {shop['name']}\n📥 Всего: {total}\n📞 Показано: {phone_shown}"
     tariff_info = get_tariff_display(shop)
     if tariff_info: text += f"\n\n{tariff_info}"
     
@@ -270,9 +270,9 @@ async def callback_show_phone(callback_query: CallbackQuery):
     await callback_query.message.edit_text(
         f"✅ <b>Заявка #{str(request_id)[-6:]}</b>\n\n"
         f"🚙 {request['car_brand']} {request['car_model']}\n"
-        f"🔧 {request['part_name']}\n\n"
+        f" {request['part_name']}\n\n"
         f"📞 <b>{request['client_phone']}</b>\n"
-        f"👤 {request.get('client_name', 'Не указан')}"
+        f" {request.get('client_name', 'Не указан')}"
     )
     await callback_query.answer("✅ Готово")
 
@@ -293,7 +293,7 @@ async def callback_reject(callback_query: CallbackQuery):
     db = get_db()
     db['shop_requests'].update_one({'request_id': request_id, 'shop_id': shop['_id']}, {'$set': {'status': 'rejected'}})
     
-    await callback_query.message.edit_text(f" <b>Заявка #{str(request_id)[-6:]}</b>\n\nОтмечено: нет в наличии")
+    await callback_query.message.edit_text(f"❌ <b>Заявка #{str(request_id)[-6:]}</b>\n\nОтмечено: нет в наличии")
     await callback_query.answer("Отмечено")
 
 @router.message(Command("admin"))
@@ -307,9 +307,9 @@ async def admin_panel(message: Message):
     requests_count = db['requests'].count_documents({})
     
     await message.answer(
-        f" <b>Админ-панель</b>\n\n"
-        f"🏢 Магазинов: {shops_count}\n"
-        f" Заявок: {requests_count}\n\n"
+        f"👑 <b>Админ-панель</b>\n\n"
+        f" Магазинов: {shops_count}\n"
+        f"📥 Заявок: {requests_count}\n\n"
         f"Команды:\n"
         f"/shops - список\n"
         f"/shop_info <chat_id>\n"
@@ -325,7 +325,7 @@ async def list_shops(message: Message):
     db = get_db()
     shops = list(db['shops'].find({'is_active': 1}))
     if not shops:
-        await message.answer(" Магазинов нет")
+        await message.answer("📭 Магазинов нет")
         return
     text = "🏢 <b>Магазины:</b>\n\n"
     for shop in shops:
@@ -348,7 +348,7 @@ async def add_deposit(message: Message):
     
     shop = execute_query_one('shops', {'chat_id': chat_id})
     if not shop:
-        await message.answer("❌ Магазин не найден")
+        await message.answer(" Магазин не найден")
         return
     
     new_balance = shop['deposit_balance'] + amount
@@ -372,7 +372,7 @@ async def set_fixed(message: Message):
     
     shop = execute_query_one('shops', {'chat_id': chat_id})
     if not shop:
-        await message.answer("❌ Магазин не найден")
+        await message.answer(" Магазин не найден")
         return
     
     db = get_db()
@@ -419,7 +419,7 @@ async def set_test(message: Message):
     
     shop = execute_query_one('shops', {'chat_id': chat_id})
     if not shop:
-        await message.answer("❌ Магазин не найден")
+        await message.answer(" Магазин не найден")
         return
     
     test_end = datetime.now() + timedelta(days=days)
@@ -467,10 +467,10 @@ async def send_request_to_shops(request_data):
                     [InlineKeyboardButton(text="❌ Нет в наличии", callback_data=f"reject_{request_id}")]
                 ])
                 
-                text = f"🚗 <b>Заявка #{str(request_id)[-6:]}</b>\n\n"
-                text += f" {request_data.get('car_brand')} {request_data.get('car_model')}\n"
+                text = f" <b>Заявка #{str(request_id)[-6:]}</b>\n\n"
+                text += f"🚙 {request_data.get('car_brand')} {request_data.get('car_model')}\n"
                 text += f"🔧 {request_data.get('part_name')}\n"
-                if request_data.get('client_name'): text += f"👤 {request_data.get('client_name')}\n"
+                if request_data.get('client_name'): text += f" {request_data.get('client_name')}\n"
                 
                 await bot.send_message(shop['chat_id'], text, reply_markup=keyboard)
                 sent_count += 1
@@ -484,13 +484,24 @@ async def verify_api_key(x_api_key: str = Header(None)):
         raise HTTPException(status_code=403, detail="Invalid API key")
     return x_api_key
 
+async def polling_with_retry():
+    """Polling с автоматическим перезапуском при ошибках"""
+    while True:
+        try:
+            logger.info("🚀 Запуск polling...")
+            await dp.start_polling(bot)
+        except Exception as e:
+            logger.error(f"Polling упал: {e}")
+            logger.info("⏳ Перезапуск через 10 секунд...")
+            await asyncio.sleep(10)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("🚀 Запуск ArTPart42 Shop Bot")
+    logger.info(" Запуск ArTPart42 Shop Bot")
     if test_connection():
         logger.info("✅ MongoDB подключена")
     init_db()
-    poll_task = asyncio.create_task(dp.start_polling(bot))
+    poll_task = asyncio.create_task(polling_with_retry())
     yield
     poll_task.cancel()
     await bot.session.close()
